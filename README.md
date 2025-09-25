@@ -8,14 +8,6 @@ cd Buch-Bot
 
 Положи файл google_credentials.json и файл .env, которые я тебе скину, в папку telegram_bot/.
 
-Структура должна выглядеть так:
-
-telegram_bot/
-│── main.py
-│── requirements.txt
-│── google_credentials.json
-│── .env
-
 
 Собери Docker-образ и запусти контейнер:
 
