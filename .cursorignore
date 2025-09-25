@@ -1,0 +1,5 @@
+# Игнорировать виртуальное окружение
+venv/
+telegram_bot/venv/
+alembic/
+__pycache__/

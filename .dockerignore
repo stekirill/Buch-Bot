@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.git/
+.gitignore
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.so
+**/*.log
+.env
+telegram_bot/bot.log
+telegram_bot/knowledge_base/embeddings_cache.pkl
+
