@@ -12,6 +12,7 @@ cd Buch-Bot
 Собери Docker-образ и запусти контейнер:
 
 docker build -t buch-bot .
+
 docker run -d --name buch-bot buch-bot
 
 
