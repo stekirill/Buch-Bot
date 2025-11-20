@@ -3,6 +3,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 from telegram_bot.services.bitrix_service import BitrixService
+from telegram_bot.services.stop_words_service import StopWordsService
 from telegram_bot.database.engine import async_session_factory
 from telegram_bot.database.models import Client, BitrixTaskLink
 from telegram_bot.utils.transliteration import get_russian_name
@@ -121,3 +122,71 @@ async def command_time_handler(message: Message) -> None:
 Рабочие часы: {settings.processing_schedule['weekdays']} (пн-пт)"""
     
     await message.answer(response)
+
+
+@router.message(Command("test_stop_words"))
+async def command_test_stop_words_handler(message: Message, stop_words_service: StopWordsService | None = None) -> None:
+    """
+    Команда для тестирования стоп-слов из Google Sheets
+    """
+    if not stop_words_service:
+        await message.answer("Сервис стоп-слов недоступен.")
+        return
+    
+    # Получаем информацию о стоп-словах
+    count = stop_words_service.get_stop_words_count()
+    stop_words = stop_words_service.get_stop_words()
+    
+    # Формируем ответ
+    response = f"""🛑 **Информация о стоп-словах:**
+
+📊 Загружено стоп-слов: **{count}**
+
+📝 Список стоп-слов:
+"""
+    
+    if stop_words:
+        for i, word in enumerate(stop_words[:20], 1):  # Показываем первые 20
+            response += f"{i}. `{word}`\n"
+        
+        if len(stop_words) > 20:
+            response += f"\n... и еще {len(stop_words) - 20} слов"
+    else:
+        response += "Список пуст или не загружен"
+    
+    # Добавляем тест
+    test_message = "Это тестовое сообщение для проверки стоп-слов"
+    contains_stop = stop_words_service.contains_stop_word(test_message)
+    
+    response += f"""
+
+🧪 **Тест:**
+Сообщение: `{test_message}`
+Содержит стоп-слово: **{'Да' if contains_stop else 'Нет'}**
+
+💡 Используйте эту команду для проверки работы стоп-слов."""
+    
+    await message.answer(response, parse_mode="Markdown")
+
+
+@router.message(Command("refresh_stop_words"))
+async def command_refresh_stop_words_handler(message: Message, stop_words_service: StopWordsService | None = None) -> None:
+    """
+    Команда для принудительного обновления стоп-слов из Google Sheets
+    """
+    if not stop_words_service:
+        await message.answer("Сервис стоп-слов недоступен.")
+        return
+    
+    await message.answer("🔄 Обновляю стоп-слова из Google Sheets...")
+    
+    try:
+        # Принудительно обновляем стоп-слова
+        import asyncio
+        await asyncio.get_event_loop().run_in_executor(None, stop_words_service._load_once)
+        
+        count = stop_words_service.get_stop_words_count()
+        await message.answer(f"✅ Стоп-слова обновлены! Загружено: **{count}** слов/фраз", parse_mode="Markdown")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при обновлении стоп-слов: {str(e)}")

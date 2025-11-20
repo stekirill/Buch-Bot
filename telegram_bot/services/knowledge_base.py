@@ -144,22 +144,17 @@ class KnowledgeBaseService:
             if not lines:
                 continue
             
-            # Ищем строку, начинающуюся с "Вопрос:"
-            question_line = ""
+            # Ищем ВСЕ строки, начинающиеся с "Вопрос:"
             for line in lines:
                 if line.lower().strip().startswith("вопрос:"):
-                    question_line = line.strip()
-                    break
-            
-            if question_line:
-                # Извлекаем текст вопроса после "Вопрос:"
-                kb_question = question_line[len("Вопрос:"):].strip().lower()
-                # Удаляем знаки препинания в конце для более мягкого сравнения
-                kb_question = kb_question.rstrip('.?!')
-                normalized_query = normalized_query.rstrip('.?!')
+                    # Извлекаем текст вопроса после "Вопрос:"
+                    kb_question = line[len("Вопрос:"):].strip().lower()
+                    # Удаляем знаки препинания в конце для более мягкого сравнения
+                    kb_question = kb_question.rstrip('.?!')
+                    normalized_query_clean = normalized_query.rstrip('.?!')
 
-                if kb_question == normalized_query:
-                    # logger.info(f"KB exact match found for query: '{query}'") # This line was not in the original file, so it's not added.
-                    return chunk
+                    if kb_question == normalized_query_clean:
+                        # logger.info(f"KB exact match found for query: '{query}'")
+                        return chunk
 
         return None

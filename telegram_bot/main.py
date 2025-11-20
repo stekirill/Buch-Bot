@@ -18,6 +18,7 @@ from telegram_bot.services.bitrix_service import BitrixService
 from telegram_bot.services.roster_service import RosterService
 from telegram_bot.services.perplexity_service import PerplexityService
 from telegram_bot.services.chat_history_service import ChatHistoryService
+from telegram_bot.services.stop_words_service import StopWordsService
 from telegram_bot.config.settings import BotSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -59,12 +60,18 @@ async def main():
     bitrix_service = BitrixService(settings)
     roster_service = RosterService(settings)
     chat_history_service = ChatHistoryService()
+    stop_words_service = StopWordsService(settings)
     print("Сервисы созданы.")
     
     print("6. Загрузка таблицы чатов/ответственных...")
     await roster_service.initialize()
     roster_service.start_periodic_refresh()
     print("Таблица загружена.")
+    
+    print("6.1. Загрузка стоп-слов...")
+    await stop_words_service.initialize()
+    stop_words_service.start_periodic_refresh()
+    print("Стоп-слова загружены.")
     
     print("7. Создание бота и диспетчера...")
     bot, dp = await create_bot()
@@ -79,6 +86,7 @@ async def main():
         bitrix_service=bitrix_service,
         roster_service=roster_service,
         chat_history_service=chat_history_service,
+        stop_words_service=stop_words_service,
     )
     print("Роутеры и middleware настроены.")
     
@@ -90,7 +98,7 @@ async def main():
     
     try:
         print("--- НАЧИНАЮ ПОЛЛИНГ ---")
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         await bot.session.close()
         scheduler.shutdown()

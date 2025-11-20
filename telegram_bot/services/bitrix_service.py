@@ -76,6 +76,16 @@ class BitrixService:
         if not self.webhook_base:
             return None
         responsible = responsible_id if responsible_id is not None else self.default_responsible_id
+        
+        # Проверяем, что исполнитель указан (обязательное поле для Bitrix)
+        if responsible is None:
+            logger.error(
+                f"Не указан исполнитель для задачи. "
+                f"responsible_id={responsible_id}, default_responsible_id={self.default_responsible_id}, "
+                f"chat_id={chat_id}, client_user_id={client_user_id}"
+            )
+            return None
+        
         url = f"{self.webhook_base}/tasks.task.add.json"
         
         # Добавляем ID пользователя и чата как надежные метки
@@ -90,9 +100,8 @@ class BitrixService:
         fields: Dict[str, object] = {
             "TITLE": title,
             "DESCRIPTION": final_description,
+            "RESPONSIBLE_ID": responsible,  # Теперь всегда добавляем, т.к. проверили выше
         }
-        if responsible is not None:
-            fields["RESPONSIBLE_ID"] = responsible
         if accomplices:
             fields["ACCOMPLICES"] = accomplices
 
@@ -100,7 +109,14 @@ class BitrixService:
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.post(url, json=payload) as resp:
-                    resp.raise_for_status()
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error(
+                            f"Ошибка при создании задачи в Битрикс: {resp.status}, "
+                            f"message='{resp.reason}', url='{url}', "
+                            f"response_body='{error_text}', payload={payload}"
+                        )
+                        resp.raise_for_status()
                     data = await resp.json()
                     result = data.get("result")
                     
@@ -110,8 +126,14 @@ class BitrixService:
                     
                     logger.warning(f"Не удалось создать задачу в Битрикс. Ответ: {data}")
                     return None
+        except aiohttp.ClientResponseError as e:
+            logger.error(
+                f"Ошибка HTTP при создании задачи в Битрикс: {e.status}, "
+                f"message='{e.message}', url='{url}', payload={payload}"
+            )
+            return None
         except Exception as e:
-            logger.error(f"Ошибка при создании задачи в Битрикс: {e}")
+            logger.error(f"Ошибка при создании задачи в Битрикс: {e}, payload={payload}")
             return None
 
     async def get_task_updates(self, since: datetime) -> List[Dict]:

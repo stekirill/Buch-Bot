@@ -27,6 +27,9 @@ class BotSettings:
     # Service account credentials: either path to JSON or base64-encoded JSON
     google_sa_json_path: Optional[str] = os.getenv("GOOGLE_SA_JSON")
     google_sa_b64: Optional[str] = os.getenv("GOOGLE_SA_B64")
+    
+    # Google Sheets ID for stop words
+    stop_words_sheet_id: str = os.getenv("STOP_WORDS_SHEET_ID", "1pnFHG61uL0VzAu2fm4uYiShHUsbVCHd5r2R_X65sD_A")
 
     # Default Bitrix responsible if mapping is missing
     default_responsible_id: Optional[int] = int(os.getenv("DEFAULT_RESPONSIBLE_ID")) if os.getenv("DEFAULT_RESPONSIBLE_ID") else None

@@ -65,6 +65,18 @@ async def handle_attachments(
 
     settings = BotSettings()
 
+    # Фильтр для сотрудников (не обрабатываем файлы от сотрудников, но сохраняем в историю)
+    if message.from_user.username and message.from_user.username.lstrip('@') in settings.staff_usernames:
+        # Получаем клиента и сессию для сохранения в историю
+        local_session, ensured_client = await _ensure_client(session, message)
+        caption = message.caption or f"Файл: {message.document.file_name if message.document else 'вложение'}"
+        await chat_history_service.add_message_to_history(
+            session=local_session, client_id=ensured_client.id, chat_id=message.chat.id,
+            role="user", content=caption
+        )
+        if session is None: await local_session.close()
+        return
+
     # Готовим ссылки на файлы Telegram
     bot = message.bot
     file_links: list[str] = []
@@ -316,13 +328,25 @@ async def handle_text_message(
             # 2. Проверка на off-tariff. Если платная услуга И нет ответа в БЗ, создаем задачу на продажников и выходим.
             is_off_tariff = await ai_service.check_if_off_tariff(question, history)
             if is_off_tariff:
-                await message.answer("Принято, подключаю вашего менеджера к диалогу. @EK_ak1 @SK_AK3")
+                # Используем транслитерированное имя и проверяем первое обращение сегодня
+                russian_name = get_russian_name(full_name)
+                is_first_today = await chat_history_service.is_first_assistant_reply_today(session, chat_id=message.chat.id)
+                response_text = "Принято, подключаю вашего менеджера к диалогу. @EK_ak1 @SK_AK3"
+                formatted_response = await ai_service.format_response_with_name(response_text, russian_name, is_first_today)
+                await message.answer(formatted_response)
+                
+                # Сохраняем ответ в историю
+                await chat_history_service.add_message_to_history(
+                    session=session, client_id=client.id, chat_id=message.chat.id,
+                    role="assistant", content=formatted_response
+                )
+                
                 sales_ids = settings.sales_responsible_ids
                 if sales_ids:
                     responsible_id = sales_ids[0]
                     accomplices = sales_ids[1:] if len(sales_ids) > 1 else None
                     task_title = f"Продажа/доп.услуга: {question[:100]}"
-                    task_description = f"Клиент '{full_name}' (@{message.from_user.username or 'N/A'}) запросил услугу вне тарифа.\n\n" \
+                    task_description = f"Клиент '{russian_name}' (@{message.from_user.username or 'N/A'}) запросил услугу вне тарифа.\n\n" \
                                        f"Текст запроса:\n{question}"
                     await bitrix_service.create_task(
                         title=task_title,

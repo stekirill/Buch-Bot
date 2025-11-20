@@ -7,11 +7,14 @@ from telegram_bot.middleware.typing import AIServiceMiddleware
 from telegram_bot.middleware.bitrix import BitrixServiceMiddleware
 from telegram_bot.middleware.roster import RosterMiddleware
 from telegram_bot.middleware.chat_history import ChatHistoryMiddleware
+from telegram_bot.middleware.stop_words import StopWordsMiddleware
+from telegram_bot.middleware.stop_words_service import StopWordsServiceMiddleware
 
 from telegram_bot.services.ai_service import AIService
 from telegram_bot.services.bitrix_service import BitrixService
 from telegram_bot.services.roster_service import RosterService
 from telegram_bot.services.chat_history_service import ChatHistoryService
+from telegram_bot.services.stop_words_service import StopWordsService
 
 def setup_dispatcher(
     dp: Dispatcher,
@@ -20,6 +23,7 @@ def setup_dispatcher(
     bitrix_service: BitrixService,
     roster_service: RosterService,
     chat_history_service: ChatHistoryService,
+    stop_words_service: StopWordsService,
 ):
     """
     Настройка роутеров и middleware для диспетчера.
@@ -36,8 +40,10 @@ def setup_dispatcher(
         bitrix_mw = BitrixServiceMiddleware(bitrix_service=bitrix_service)
         roster_mw = RosterMiddleware(roster=roster_service)
         history_mw = ChatHistoryMiddleware(chat_history_service=chat_history_service)
+        stop_words_mw = StopWordsMiddleware(stop_words_service=stop_words_service)
+        stop_words_service_mw = StopWordsServiceMiddleware(stop_words_service=stop_words_service)
 
-        for mw in (ai_mw, bitrix_mw, roster_mw, history_mw):
+        for mw in (ai_mw, bitrix_mw, roster_mw, history_mw, stop_words_mw, stop_words_service_mw):
             router.message.middleware(mw)
             router.callback_query.middleware(mw)
 

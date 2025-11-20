@@ -171,10 +171,45 @@ class RosterService:
         return cleaned
 
     def get_responsible_id(self, chat_id: int) -> Optional[int]:
+        # Пробуем найти запись по точному совпадению
         entry = self._entries_by_chat_id.get(chat_id)
+        
+        # Если не нашли и chat_id начинается с -100 (супергруппа/канал),
+        # пробуем найти по числовой части без префикса
+        if entry is None and chat_id < -1000000000000:
+            # Преобразуем -1003128335340 -> 3128335340 (положительное)
+            numeric_part = abs(chat_id) % 1000000000000
+            entry = self._entries_by_chat_id.get(numeric_part)
+            
+            # Также пробуем -3128335340 (отрицательное без префикса -100)
+            if entry is None:
+                negative_part = -numeric_part
+                entry = self._entries_by_chat_id.get(negative_part)
+        
+        # Если не нашли и chat_id положительный, пробуем найти с префиксом -100
+        if entry is None and chat_id > 0:
+            prefixed_id = -1000000000000 - chat_id
+            entry = self._entries_by_chat_id.get(prefixed_id)
+        
+        # Если не нашли и chat_id отрицательный (но не с префиксом -100), пробуем найти с префиксом -100
+        if entry is None and chat_id < 0 and chat_id > -1000000000000:
+            # Преобразуем -3128335340 -> -1003128335340
+            prefixed_id = -1000000000000 - abs(chat_id)
+            entry = self._entries_by_chat_id.get(prefixed_id)
+        
         if entry and entry.bitrix_responsible_id is not None:
             return entry.bitrix_responsible_id
-        return self.settings.default_responsible_id
+        
+        result = self.settings.default_responsible_id
+        # Логируем ошибку только если действительно не найден исполнитель
+        if result is None:
+            logger.error(
+                f"Не найден исполнитель для chat_id={chat_id}. "
+                f"Запись в ростер: {entry is not None}, "
+                f"default_responsible_id: {self.settings.default_responsible_id}, "
+                f"всего записей в ростер: {len(self._entries_by_chat_id)}"
+            )
+        return result
 
     def get_tg_responsibles(self, chat_id: int) -> List[str]:
         entry = self._entries_by_chat_id.get(chat_id)
