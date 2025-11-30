@@ -19,3 +19,11 @@ class BotKeyboards:
             [InlineKeyboardButton(text="👤 Позвать бухгалтера", callback_data=f"call_expert:{task_id}")]
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    @staticmethod
+    def get_cancel_clarify_keyboard(task_id: int) -> InlineKeyboardMarkup:
+        """Клавиатура с кнопкой отмены уточнения."""
+        buttons = [
+            [InlineKeyboardButton(text="❌ Отменить уточнение", callback_data=f"cancel_clarify:{task_id}")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)

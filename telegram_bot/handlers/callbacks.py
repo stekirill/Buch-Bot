@@ -8,6 +8,7 @@ from telegram_bot.services.bitrix_service import BitrixService
 from telegram_bot.services.state import STATE
 from telegram_bot.services.roster_service import RosterService
 from telegram_bot.database.models import Client, BitrixTaskLink
+from telegram_bot.utils.keyboards import BotKeyboards
 from sqlalchemy import select
 
 router = Router()
@@ -118,6 +119,78 @@ async def handle_clarify_callback(
     # Отвечаем пользователю и удаляем кнопки
     await callback_query.message.edit_reply_markup(reply_markup=None)
     await callback_query.answer() # Закрываем "часики"
-    await callback_query.message.answer("Слушаю ваше уточнение. Присылайте текст, фото или документы.")
+    
+    # Отправляем сообщение с кнопкой отмены
+    cancel_keyboard = BotKeyboards.get_cancel_clarify_keyboard(task_id)
+    await callback_query.message.answer(
+        "Слушаю ваше уточнение. Присылайте текст, фото или документы.",
+        reply_markup=cancel_keyboard
+    )
     
     logger.info(f"Пользователь {callback_query.from_user.id} нажал 'Уточнить' для задачи {task_id} в чате {callback_query.message.chat.id}. Установлено состояние ожидания.")
+
+
+@router.callback_query(F.data.startswith("cancel_clarify:"))
+async def handle_cancel_clarify_callback(
+    callback_query: CallbackQuery,
+    *,
+    session: AsyncSession,
+    client: Optional[Client] = None
+):
+    """
+    Обрабатывает нажатие кнопки 'Отменить уточнение'.
+    Удаляет состояние ожидания уточнения.
+    """
+    try:
+        _, task_id_str = callback_query.data.split(":", 1)
+        if not task_id_str or task_id_str.strip() == "":
+            logger.error(f"Пустой task_id в callback_data: {callback_query.data}")
+            await callback_query.answer("Произошла ошибка, не удалось определить задачу.", show_alert=True)
+            return
+        task_id = int(task_id_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Ошибка извлечения task_id из callback_data: {callback_query.data}. Ошибка: {e}")
+        await callback_query.answer("Произошла ошибка, не удалось определить задачу.", show_alert=True)
+        return
+
+    if client is None:
+        row = await session.execute(select(Client).where(Client.user_id == callback_query.from_user.id))
+        client = row.scalars().one_or_none()
+    
+    if not client:
+        logger.warning(f"Не удалось найти клиента с telegram_id={callback_query.from_user.id} для отмены уточнения.")
+        await callback_query.answer("Не удалось определить ваш профиль.", show_alert=True)
+        return
+
+    # Проверяем, есть ли активное ожидание уточнения
+    existing_task_id = STATE.get_pending_clarify(callback_query.message.chat.id, client.user_id)
+    
+    if existing_task_id is None:
+        # Нет активного ожидания
+        await callback_query.answer("Нет активного ожидания уточнения.", show_alert=True)
+        # Удаляем кнопку, если она есть
+        try:
+            await callback_query.message.edit_reply_markup(reply_markup=None)
+        except:
+            pass
+        return
+    
+    if existing_task_id != task_id:
+        # Пользователь пытается отменить уточнение для другой задачи
+        await callback_query.answer(
+            f"Активно ожидание уточнения для задачи #{existing_task_id}, а не для #{task_id}.",
+            show_alert=True
+        )
+        return
+
+    # Удаляем состояние ожидания
+    STATE.remove_pending_clarify(callback_query.message.chat.id, client.user_id)
+    
+    # Удаляем кнопку отмены
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await callback_query.answer("Уточнение отменено. Можете продолжать обычный диалог.")
+    
+    # Отправляем подтверждающее сообщение
+    await callback_query.message.answer("✅ Уточнение отменено. Теперь ваши сообщения будут обрабатываться как обычно.")
+    
+    logger.info(f"Пользователь {callback_query.from_user.id} отменил уточнение для задачи {task_id} в чате {callback_query.message.chat.id}.")

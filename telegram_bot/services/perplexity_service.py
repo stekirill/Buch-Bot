@@ -11,19 +11,47 @@ class PerplexityService:
         else:
             self.client = None
 
-    async def search_its_glavbukh(self, query: str) -> Tuple[str, List[Dict[str, str]]]:
+    async def search_its_glavbukh(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> Tuple[str, List[Dict[str, str]]]:
         """
         Returns (answer_text, sources_info[{url, title}]) or ("", []) if disabled/error.
+        
+        Args:
+            query: Текущий вопрос пользователя
+            history: История чата (последние сообщения). Если передана, используются последние 4 сообщения для контекста.
         """
         if not self.enabled or self.client is None:
             return "", []
         try:
+            # Формируем системный промпт с акцентом на ответ на неотвеченный вопрос
+            system_content = """Отвечай на русском, вежливо, без канцелярита, ЛАКОНИЧНО и по делу. Избегай лишних деталей и воды. Пользователь должен получить удовольствие от ознакомления с информацией. Никакой Markdown-разметки типа ** или ##.
+
+ВАЖНО: Если в контексте диалога есть неотвеченный вопрос пользователя, дай ответ именно на него, используя контекст предыдущих сообщений для лучшего понимания. Будь кратким, но информативным."""
+            
+            messages = [{"role": "system", "content": system_content}]
+            
+            # Собираем историю в один user-промпт, чтобы не нарушать формат чередования ролей
+            if history:
+                recent_history = history[-4:] if len(history) > 4 else history
+                history_lines = []
+                for msg in recent_history:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if not content:
+                        continue
+                    history_lines.append(f"{role}: {content}")
+                history_str = "\n".join(history_lines)
+                user_content = (
+                    f"История диалога (для контекста):\n{history_str}\n\n---\n"
+                    f"Текущий вопрос пользователя:\n{query}"
+                )
+            else:
+                user_content = query
+
+            messages.append({"role": "user", "content": user_content})
+            
             base_args = dict(
                 model="sonar",
-                messages=[
-                    {"role": "system", "content": "Отвечай на русском, вежливо, без канцелярита, в меру детально и ссылайся на источники. Полльзователь должен получить удовольствие от ознакомления с информацией. Никакой Mardown-разметки типа ** или ##"},
-                    {"role": "user", "content": query},
-                ],
+                messages=messages,
             )
             try:
                 # Perplexity-specific params should go via extra_body in OpenAI-compatible SDK

@@ -170,7 +170,11 @@ class RosterService:
                 cleaned.append(u)
         return cleaned
 
-    def get_responsible_id(self, chat_id: int) -> Optional[int]:
+    def _find_entry_by_chat_id(self, chat_id: int) -> Optional[RosterEntry]:
+        """
+        Находит запись в ростер по chat_id с учетом нормализации.
+        Пробует различные варианты: с префиксом -100 и без него.
+        """
         # Пробуем найти запись по точному совпадению
         entry = self._entries_by_chat_id.get(chat_id)
         
@@ -197,6 +201,11 @@ class RosterService:
             prefixed_id = -1000000000000 - abs(chat_id)
             entry = self._entries_by_chat_id.get(prefixed_id)
         
+        return entry
+
+    def get_responsible_id(self, chat_id: int) -> Optional[int]:
+        entry = self._find_entry_by_chat_id(chat_id)
+        
         if entry and entry.bitrix_responsible_id is not None:
             return entry.bitrix_responsible_id
         
@@ -212,10 +221,10 @@ class RosterService:
         return result
 
     def get_tg_responsibles(self, chat_id: int) -> List[str]:
-        entry = self._entries_by_chat_id.get(chat_id)
+        entry = self._find_entry_by_chat_id(chat_id)
         return entry.tg_responsibles if entry else []
 
     def get_entry(self, chat_id: int) -> Optional[RosterEntry]:
-        return self._entries_by_chat_id.get(chat_id)
+        return self._find_entry_by_chat_id(chat_id)
 
 

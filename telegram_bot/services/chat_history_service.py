@@ -77,3 +77,26 @@ class ChatHistoryService:
         )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_unanswered_user_messages(self, session: AsyncSession, chat_id: int) -> List[str]:
+        """Получить все сообщения пользователя, отправленные ПОСЛЕ последнего ответа ассистента."""
+        # 1. Находим время последнего ответа бота
+        last_assist_stmt = (
+            select(ChatMessage.created_at)
+            .where(and_(ChatMessage.chat_id == chat_id, ChatMessage.role == 'assistant'))
+            .order_by(desc(ChatMessage.created_at))
+            .limit(1)
+        )
+        last_assist_time = (await session.execute(last_assist_stmt)).scalar_one_or_none()
+
+        # 2. Берем все сообщения пользователя после этого времени
+        stmt = select(ChatMessage.content).where(and_(ChatMessage.chat_id == chat_id, ChatMessage.role == 'user'))
+        
+        if last_assist_time:
+            stmt = stmt.where(ChatMessage.created_at > last_assist_time)
+        
+        # Сортируем от старых к новым, чтобы склеить текст в правильном порядке
+        stmt = stmt.order_by(ChatMessage.created_at)
+        
+        result = await session.execute(stmt)
+        return list(result.scalars())

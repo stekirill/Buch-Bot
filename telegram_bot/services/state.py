@@ -32,6 +32,17 @@ class AppState:
     def get_pending_clarify(self, chat_id: int, user_id: int) -> Optional[int]:
         return self.pending_clarify.get((chat_id, user_id))
 
+    def remove_pending_clarify(self, chat_id: int, user_id: int) -> bool:
+        """
+        Удаляет состояние ожидания уточнения без возврата task_id.
+        Возвращает True, если состояние было удалено, False - если его не было.
+        """
+        key = (chat_id, user_id)
+        if key in self.pending_clarify:
+            del self.pending_clarify[key]
+            return True
+        return False
+
     def set_pending_pre_task_clarification(self, chat_id: int, client_id: int, original_question: str):
         """Запоминает, что бот задал уточняющий вопрос ПЕРЕД созданием задачи."""
         key = (chat_id, client_id)
