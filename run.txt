@@ -1,0 +1,4 @@
+ docker build -t buchbot . && docker rm -f buchbot && docker run -d --name buchbot --restart unless-stopped buchbot
+
+telegram_bot/venv/Scripts/activate
+python -m telegram_bot.main 

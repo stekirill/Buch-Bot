@@ -257,13 +257,14 @@ async def process_accumulated_messages(
             question: str, 
             history: list, 
             skip_clarification: bool = False,
-            custom_reply_text: Optional[str] = None
+            custom_reply_text: Optional[str] = None,
+            force_create_task: bool = False,
         ) -> None:
             # 1. Поиск по БЗ
-            playbook = await ai_service.get_kb_playbook(question, session, chat_id, min_confidence=0.85)
+            playbook = await ai_service.get_kb_playbook(question, session, chat_id, min_confidence=0.75, history=history)
             if playbook:
                 reply_text = playbook.get("reply")
-                creates_task = playbook.get("create_task") and bitrix_service
+                creates_task = (playbook.get("create_task") and bitrix_service) or force_create_task
                 if reply_text:
                     reply_text = await ai_service.strip_kb_header_with_llm(reply_text)
                     is_first_today = await chat_history_service.is_first_assistant_reply_today(session, chat_id=chat_id)
@@ -365,7 +366,8 @@ async def process_accumulated_messages(
                 await session.commit()
                 await send_answer(notice + CLARIFY_INSTRUCTION_HTML, reply_markup=reply_markup, parse_mode="HTML")
             else:
-                await send_answer("Не удалось создать задачу.")
+                logger.error(f"Failed to create task for chat {chat_id}, question='{question[:120]}', responsible_id={responsible_id}")
+                await send_answer("Не удалось автоматически поставить задачу бухгалтеру. Сообщила команде, ответ придёт позже.")
 
         # --- ROUTING LOGIC ---
         if pre_task_original_question:
@@ -417,19 +419,37 @@ async def process_accumulated_messages(
 
         if category in (QuestionCategory.BITRIX_TASK, QuestionCategory.GENERAL_QUESTION):
             logger.info(f"Chat {chat_id}: handling as BITRIX_TASK/GENERAL_QUESTION")
+
+            auto_answer, ok = await ai_service.try_auto_answer(
+                combined_text,
+                history,
+                msk_now=msk_now.strftime('%Y-%m-%d %H:%M:%S'),
+                first_name=first_name,
+            )
+            if ok and auto_answer:
+                is_first_today = await chat_history_service.is_first_assistant_reply_today(session, chat_id=chat_id)
+                final_text = await ai_service.format_response_with_name(auto_answer, full_name, is_first_today)
+                await chat_history_service.add_message_to_history(
+                    session=session, client_id=client.id, chat_id=chat_id, role="assistant", content=auto_answer
+                )
+                await session.commit()
+                await send_answer(final_text, parse_mode="HTML", disable_web_page_preview=True)
+                logger.info(f"Chat {chat_id}: auto-answered")
+                return
+
             await _create_or_update_task_flow(combined_text, history)
             logger.info(f"Chat {chat_id}: task flow completed")
             
         elif category == QuestionCategory.MIXED_QUESTION_AND_TASK:
             logger.info(f"Chat {chat_id}: handling as MIXED_QUESTION_AND_TASK")
             
-            # 1. Сначала пробуем локальную БЗ с высоким порогом (0.85)
-            playbook = await ai_service.get_kb_playbook(combined_text, session, chat_id, min_confidence=0.85)
+            # 1. Сначала пробуем локальную БЗ с порогом 0.75
+            playbook = await ai_service.get_kb_playbook(combined_text, session, chat_id, min_confidence=0.75, history=history)
             
             if playbook and playbook.get("reply"):
                 # БЗ нашла с достаточной уверенностью - используем стандартный flow
                 logger.info(f"Chat {chat_id}: MIXED - found in KB (confidence >= 0.85)")
-                await _create_or_update_task_flow(combined_text, history)
+                await _create_or_update_task_flow(combined_text, history, force_create_task=True)
             else:
                 # БЗ не нашла (confidence < 0.85) - генерируем ответ на основе общих знаний GPT
                 logger.info(f"Chat {chat_id}: MIXED - KB not found (confidence < 0.85), generating general answer")
@@ -453,7 +473,7 @@ async def process_accumulated_messages(
                     logger.info(f"Chat {chat_id}: MIXED - GPT generation failed")
                 
                 # В любом случае создаём задачу (т.к. есть просьба о действии)
-                await _create_or_update_task_flow(combined_text, history, skip_clarification=True)
+                await _create_or_update_task_flow(combined_text, history, skip_clarification=True, force_create_task=True)
                 
             logger.info(f"Chat {chat_id}: MIXED_QUESTION_AND_TASK completed")
             
@@ -476,7 +496,8 @@ async def process_accumulated_messages(
              logger.info(f"Chat {chat_id}: handling as NON_STANDARD_FAQ")
              response_text, is_first_today, success, _, _ = await ai_service.generate_response(
                  question=combined_text, user_id=user_id, session=session, client_db_id=client.id,
-                 chat_id=chat_id, msk_now=msk_now.strftime('%Y-%m-%d %H:%M:%S'), first_name=first_name, username=username
+                 chat_id=chat_id, msk_now=msk_now.strftime('%Y-%m-%d %H:%M:%S'), first_name=first_name, username=username,
+                 history=history
              )
              if success:
                  await chat_history_service.add_message_to_history(session=session, client_id=client.id, chat_id=chat_id, role="assistant", content=response_text)

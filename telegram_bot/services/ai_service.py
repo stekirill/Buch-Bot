@@ -33,6 +33,112 @@ class AIService:
         self.history = ChatHistoryService()
         self.perplexity = perplexity
 
+    async def try_auto_answer(
+        self,
+        question: str,
+        history: list[dict],
+        msk_now: str,
+        first_name: str,
+    ) -> tuple[str | None, bool]:
+        """
+        Единый LLM-флоу: решить, можно ли ответить самой, или нужна задача на бухгалтера.
+        Возвращает (answer_text | None, ok_flag). ok_flag=True только если надо отвечать сейчас.
+        """
+        history_str = "\n".join(f"{m['role']}: {m['content']}" for m in history[-20:])
+        russian_name = get_russian_name(first_name or "")
+
+        system_prompt = f"""
+Ты — ИИ-ассистент Алина (жен.) в бухгалтерской компании. Дата (МСК): {msk_now}. Клиент: {russian_name}.
+Реши: можешь ли ты ответить сама (без данных клиента/действий бухгалтера), или нужна задача.
+
+ОТВЕЧАЙ САМА (action="answer"), если:
+- Справочный/теоретический вопрос (ставки, сроки, правила)
+- Расчёт по числам, указанным в вопросе (страхвзносы, налоги, НДФЛ)
+- Не нужны данные клиента/компании, отчёты, выгрузки, документы, статус, задачи
+
+СОЗДАЙ ЗАДАЧУ (action="task"), если:
+- Нужны данные клиента (доход, выручка, расходы, прибыль, отчёты, документы)
+- Сравнение периодов по клиенту (прошлый/текущий год/месяц)
+- Требуется действие бухгалтера или данные из учёта
+- Не хватает данных для расчёта, есть сомнения — выбирай task
+
+Формат JSON строго:
+{{"action": "answer", "text": "краткий ответ до 3 предложений, без Markdown"}}
+или
+{{"action": "task"}}
+
+Запреты: не придумывай данные клиента; не выдумывай годы/периоды, которых нет в вопросе/истории (кроме текущего года {msk_now[:4]}). Если не уверена — task.
+"""
+        try:
+            completion = await self.client.chat.completions.create(
+                model="gpt-5.1",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"История:\n{history_str}\n---\nВопрос:\n{question}"},
+                ],
+                response_format={"type": "json_object"},
+                max_completion_tokens=500,
+            )
+            result = json.loads(completion.choices[0].message.content or "{}")
+            if result.get("action") == "answer" and result.get("text"):
+                return result["text"], True
+            return None, False
+        except Exception as e:
+            logger.error(f"try_auto_answer failed: {e}")
+            return None, False
+
+    async def can_answer_without_client_data(self, question: str, history: list[dict]) -> bool:
+        """
+        True, если можно ответить сразу (общие правила/математика), без данных клиента, документов и действий бухгалтера.
+        Жёсткий запрет на финпоказатели/сравнения/выручку/доходы.
+        """
+        history_str = "\n".join(f"{m['role']}: {m['content']}" for m in history[-40:])
+        system_prompt = """
+        Верни JSON {"can_answer": true|false}.
+        true — только если вопрос самодостаточен: можно ответить из общих правил или посчитать по числам в вопросе,
+        НЕ нужны данные клиента/компании, документы, статусы, выгрузки, задачи, действия бухгалтера.
+        false — если вопрос про доход/выручку/расходы/прибыль/показатели/отчёты, сравнение по периодам (прошлый/текущий год/месяц),
+        или если нужны клиентские данные, документы, статусы, выгрузки, расчёты по базе клиента, либо действие бухгалтера.
+        При малейшем сомнении — возвращай false.
+        """
+        try:
+            completion = await self.client.chat.completions.create(
+                model="gpt-5.1",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"История:\n{history_str}\n---\nВопрос:\n{question}"},
+                ],
+                response_format={"type": "json_object"},
+                max_completion_tokens=120,
+            )
+            result_str = completion.choices[0].message.content or "{}"
+            import json
+            return bool(json.loads(result_str).get("can_answer", False))
+        except Exception as e:
+            logger.error(f"can_answer_without_client_data failed: {e}")
+            return False
+
+    def _short_history(self, history: List[Dict[str, str]], max_msgs: int = 8, max_chars: int = 1200) -> str:
+        """
+        Берет последние max_msgs сообщений и обрезает суммарно до max_chars, чтобы дать компактный контекст.
+        """
+        if not history:
+            return ""
+        hist = history[-max_msgs:]
+        parts: List[str] = []
+        total = 0
+        for m in hist:
+            role = m.get("role", "user")
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            line = f"{role}: {content}"
+            if total + len(line) > max_chars:
+                break
+            parts.append(line)
+            total += len(line)
+        return "\n".join(parts)
+
 
     async def check_if_off_tariff(self, question: str, history: List[Dict[str, str]]) -> bool:
         """
@@ -88,9 +194,8 @@ class AIService:
 
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.0,
                 response_format={"type": "json_object"}
             )
             result_str = completion.choices[0].message.content
@@ -143,10 +248,9 @@ class AIService:
         ]
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.1,
-                max_tokens=200
+                max_completion_tokens=200
             )
             content = (completion.choices[0].message.content or "").strip()
             if content.upper() == 'ПОЛНЫЙ':
@@ -193,10 +297,9 @@ class AIService:
         ]
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.0,
-                max_tokens=250
+                max_completion_tokens=250
             )
             return (completion.choices[0].message.content or "").strip()
         except Exception as e:
@@ -318,13 +421,12 @@ class AIService:
             user_prompt = f"Текст: \"{query}\"\n\nОчищенный текст:"
             
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
-                max_tokens=100,
+                max_completion_tokens=100,
             )
             cleaned_query = (completion.choices[0].message.content or "").strip().replace('"', '')
             if cleaned_query and cleaned_query != query:
@@ -350,13 +452,12 @@ class AIService:
             )
             user_prompt = f"Текст:\n{raw_text}\n---\nВерни текст без начального приветствия/имени:"
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
-                max_tokens=300,
+                max_completion_tokens=300,
             )
             cleaned = (completion.choices[0].message.content or "").strip()
             if cleaned and cleaned != raw_text.strip():
@@ -372,6 +473,7 @@ class AIService:
         question: str,
         kb_answer: str,
         msk_now: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[Optional[str], bool]:
         """
         Проверяет логичность и релевантность ответа из БЗ, улучшает его (пересчитывает даты, проверяет расчёты).
@@ -380,69 +482,39 @@ class AIService:
         """
         if not msk_now:
             msk_now = now_msk().strftime('%Y-%m-%d %H:%M:%S')
+        dialog_ctx = self._short_history(history or [], max_msgs=8, max_chars=1200)
         
         system_prompt = f"""
-        Ты — ИИ-валидатор ответов из базы знаний. Твоя задача — проверить ответ на релевантность и логичность, 
-        а затем улучшить его, пересчитав даты и проверив расчёты.
+        Ты — ИИ-валидатор ответов из базы знаний. Верни JSON {{"is_relevant": bool, "improved_answer": string|null}}.
         
-        ВАЖНО: Ответы будут использоваться от имени ассистента Алины (женщина). Используй женский род во всех глаголах (подготовила, получила, прикрепила и т.д.).
-
-        ТЕКУЩАЯ ДАТА И ВРЕМЯ (МСК): {msk_now}
-
-        ЭТАП 1: ПРОВЕРКА РЕЛЕВАНТНОСТИ
-        Проверь, действительно ли ответ из БЗ релевантен вопросу пользователя. Ответ должен:
-        - Отвечать на суть вопроса
-        - Быть применим к ситуации пользователя
-        - Не содержать устаревшей или неактуальной информации
-
-        ЭТАП 2: ПРОВЕРКА ЛОГИЧНОСТИ
-        Проверь логичность ответа:
-        - Все даты должны быть актуальными (пересчитай относительно текущей даты)
-        - Все расчёты должны быть правильными
-        - Сроки и периоды должны быть логичными
-        - Нет противоречий в тексте
-
-        ЭТАП 3: УЛУЧШЕНИЕ ОТВЕТА
-        Если ответ релевантен и логичен, улучши его:
-        - Пересчитай все даты относительно текущей даты ({msk_now})
-        - Проверь и исправь все расчёты (проценты, суммы, сроки)
-        - Адаптируй ответ под текущий контекст (например, если в БЗ написано "завтра", укажи конкретную дату)
-        - Сохрани структуру и стиль оригинального ответа
-        - НЕ меняй суть ответа, только даты, расчёты и актуализируй информацию
-
+        ТЕКУЩАЯ ДАТА (МСК): {msk_now}
+        
+        РАБОТАЙ ТАК:
+        1) Определи, на что ссылается вопрос (местоимения, "как писала выше") с опорой на контекст диалога.
+        2) Сопоставь факты из ответа БЗ с вопросом и контекстом. Если есть противоречия или явных фактов не хватает — is_relevant=false.
+        3) Собери финальный ответ своими словами (не копипастой), используя только факты из ответа БЗ, подставляя конкретику из контекста (имена, предмет обсуждения).
+        4) Пересчитай все числа и даты относительно {msk_now}. Если расчёт/дата не проверяемы — is_relevant=false.
+        
         ВАЖНО:
-        - Если ответ НЕ релевантен вопросу, верни {{"is_relevant": false, "improved_answer": null}}
+        - Используй ТОЛЬКО информацию из ответа БЗ + контекст диалога. Ничего не придумывай.
+        - Не упоминай базу, источники или примеры; отвечай как свой текст.
+        - Ответ должен быть лаконичным: не больше 2–4 коротких предложений или пунктов, без Markdown.
+        - Если ответ НЕ релевантен вопросу или контексту, верни {{"is_relevant": false, "improved_answer": null}}
         - Если ответ релевантен, но содержит нелогичные данные, которые нельзя исправить, верни {{"is_relevant": false, "improved_answer": null}}
         - Если ответ релевантен и логичен (или был улучшен), верни {{"is_relevant": true, "improved_answer": "улучшенный текст ответа"}}
-
-        ПРИМЕРЫ:
-        1. Вопрос: "Когда сдавать декларацию по УСН за 2024 год?"
-           Ответ из БЗ: "Декларацию по УСН за 2024 год нужно сдать до 30 апреля 2025 года"
-           Текущая дата: 2025-03-15
-           Результат: {{"is_relevant": true, "improved_answer": "Декларацию по УСН за 2024 год нужно сдать до 30 апреля 2025 года (осталось 46 дней)"}}
-
-        2. Вопрос: "Как рассчитать НДФЛ с зарплаты 100000 рублей?"
-           Ответ из БЗ: "НДФЛ составляет 13% от суммы, то есть 13000 рублей"
-           Результат: {{"is_relevant": true, "improved_answer": "НДФЛ составляет 13% от суммы, то есть 13000 рублей (100000 × 0.13 = 13000)"}}
-
-        3. Вопрос: "Когда сдавать отчёт?"
-           Ответ из БЗ: "Нужно сдать отчёт до 25 числа следующего месяца"
-           Текущая дата: 2025-03-15
-           Результат: {{"is_relevant": true, "improved_answer": "Нужно сдать отчёт до 25 апреля 2025 года (осталось 41 день)"}}
-
-        Верни ТОЛЬКО валидный JSON.
+        
+        Пример формата: {{"is_relevant": true, "improved_answer": "Краткий ответ..."}} или {{"is_relevant": false, "improved_answer": null}}.
         """
         
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n---\n\nОТВЕТ ИЗ БАЗЫ ЗНАНИЙ:\n{kb_answer}\n\n---\n\nПроверь релевантность и логичность, улучши ответ если нужно:"}
+            {"role": "user", "content": f"ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n{question}\n\n---\nКОНТЕКСТ ДИАЛОГА (если есть):\n{dialog_ctx}\n---\nОТВЕТ ИЗ БАЗЫ ЗНАНИЙ:\n{kb_answer}\n\n---\nПроверь релевантность, учти ссылки на контекст, улучши ответ своими словами:"}
         ]
         
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.0,
                 response_format={"type": "json_object"}
             )
             result_str = completion.choices[0].message.content
@@ -481,28 +553,11 @@ class AIService:
             msk_now = now_msk().strftime('%Y-%m-%d %H:%M:%S')
         
         system_prompt = f"""
-        Ты — ИИ-ассистент Алина, женщина, в чате бухгалтерской компании. Твоя задача — сгенерировать релевантный ответ на вопрос клиента,
-        используя информацию из базы знаний. Используй женский род во всех глаголах (подготовила, получила, прикрепила и т.д.).
-
-        ТЕКУЩАЯ ДАТА И ВРЕМЯ (МСК): {msk_now}
-
-        ПРАВИЛА:
-        1. Используй ТОЛЬКО информацию из предоставленного контекста базы знаний
-        2. Ответ должен точно отвечать на вопрос пользователя
-        3. Пересчитай все даты относительно текущей даты ({msk_now})
-        4. Проверь и покажи все расчёты (проценты, суммы, сроки)
-        5. Если в контексте есть примеры, адаптируй их под вопрос пользователя
-        6. Будь точным и конкретным
-        7. Не придумывай информацию, которой нет в контексте
-        8. Если информации недостаточно, укажи это, но используй то, что есть
-
-        СТИЛЬ:
-        - Отвечай вежливо и профессионально
-        - Будь конкретным и точным
-        - Используй актуальные даты и расчёты
-        - Не используй Markdown разметку
-
-        Верни ТОЛЬКО текст ответа, без дополнительных пояснений.
+        Ты — ИИ-ассистент Алина (жен.). Ответь вежливо и очень кратко (до 3 предложений, без Markdown).
+        Не упоминай базу/контекст/источники.
+        Используй ТОЛЬКО информацию из предоставленного контекста. Если ставок или данных (статус плательщика, год, лимиты, регион, льготы) не хватает либо они выглядят примерными/устаревшими — прямо попроси коротко уточнить и не выдумывай.
+        Пересчитай все даты и проценты относительно {msk_now}, показывай расчёты, если они есть в контексте.
+        Будь точной и конкретной.
         """
         
         messages = [
@@ -512,10 +567,9 @@ class AIService:
         
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.1,
-                max_tokens=2000,
+                max_completion_tokens=2000,
             )
             generated_answer = completion.choices[0].message.content.strip()
             logger.info(f"Generated relevant answer from KB context for question='{question[:60]}...'")
@@ -529,7 +583,8 @@ class AIService:
         question: str,
         session: AsyncSession,
         chat_id: int,
-        min_confidence: float = 0.85,
+        min_confidence: float = 0.75,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> Optional[dict]:
         """
         Ищет ответ в локальной БЗ. Если находит, использует LLM, чтобы
@@ -547,7 +602,7 @@ class AIService:
             logger.info(f"KB exact match found for cleaned query: '{cleaned_question[:80]}...' -> confidence={confidence}")
         else:
             # 3. Если точного нет, используем семантический поиск
-            context_parts, confidence = await self.knowledge_base.search_with_confidence(cleaned_question, top_k=1)
+            context_parts, confidence = await self.knowledge_base.search_with_confidence(cleaned_question, top_k=3)
             logger.info(f"KB semantic search: confidence={confidence:.3f} (min={min_confidence:.2f}) for question='{cleaned_question[:80]}...'")
             if confidence < min_confidence:
                 return None
@@ -586,9 +641,8 @@ class AIService:
         
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.0,
                 response_format={"type": "json_object"}
             )
             playbook_str = completion.choices[0].message.content
@@ -601,7 +655,8 @@ class AIService:
                 improved_reply, is_relevant = await self.validate_and_improve_kb_answer(
                     question=question,
                     kb_answer=raw_reply,
-                    msk_now=msk_now
+                    msk_now=msk_now,
+                    history=history,
                 )
                 
                 if not is_relevant or not improved_reply:
@@ -712,10 +767,9 @@ class AIService:
 
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.0,
-                max_tokens=1000, # Увеличим на всякий случай
+                max_completion_tokens=1000, # Увеличим на всякий случай
             )
             raw_category = completion.choices[0].message.content.strip().lower()
 
@@ -739,6 +793,7 @@ class AIService:
         msk_now: Optional[str] = None,
         first_name: Optional[str] = None,
         username: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[str, bool, bool, float, bool]:
         """
         Генерирует ответ ТОЛЬКО на основе локальной knowledge_base (RAG).
@@ -746,11 +801,11 @@ class AIService:
         `success` - флаг, удалось ли найти релевантный ответ.
         """
         # RAG контекст + confidence
-        context_parts, confidence = await self.knowledge_base.search_with_confidence(question, top_k=1)
+        context_parts, confidence = await self.knowledge_base.search_with_confidence(question, top_k=3)
         context = "\n---\n".join(context_parts) if context_parts else ""
 
         # Если уверенность низкая, считаем, что ответа в БЗ нет
-        if confidence < 0.82: # Порог для специфичных вопросов должен быть выше
+        if confidence < 0.75:
             return "Не удалось найти точный ответ в базе знаний.", False, False, confidence, False
 
         is_first_today = await self.history.is_first_message_today(session, chat_id=chat_id)
@@ -784,10 +839,9 @@ class AIService:
         response_text = ""
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.1,
-                max_tokens=2000,
+                max_completion_tokens=2000,
             )
             response_text = completion.choices[0].message.content.strip()
             
@@ -797,7 +851,8 @@ class AIService:
                 validated_response, is_relevant = await self.validate_and_improve_kb_answer(
                     question=question,
                     kb_answer=response_text,
-                    msk_now=msk_now_str
+                    msk_now=msk_now_str,
+                    history=history,
                 )
                 
                 if not is_relevant or not validated_response:
@@ -840,27 +895,17 @@ class AIService:
         russian_name = get_russian_name(first_name or "")
         
         system_prompt = f"""
-        Ты — ИИ-ассистент Алина, женщина, в чате бухгалтерской компании. Отвечай вежливо и профессионально.
-        Используй женский род во всех глаголах (подготовила, получила, прикрепила и т.д.).
+        Ты — ИИ-ассистент Алина, женщина, в чате бухгалтерской компании. Отвечай вежливо, профессионально и кратко (не более 3 предложений), без Markdown.
+        Обращайся по имени: {russian_name}. Используй женский род (подготовила, рассчитала и т.д.).
         
-        ТЕКУЩАЯ ДАТА И ВРЕМЯ (МСК): {msk_now}
+        Правила:
+        - Используй актуальные данные; пересчитывай даты/сроки относительно {msk_now}.
+        - Если для точного ответа не хватает исходных данных (статус плательщика, год, лимиты, регион, льготы) — попроси коротко уточнить их, не выдумывай.
+        - Если вопрос требует численного расчёта и данных достаточно, обязательно дай расчёт с итоговой цифрой (и, если уместно, короткой разбивкой по видам взносов/налогов). Округляй до двух знаков.
+        - Если вопрос про данные клиента (выручка, доход, расходы, сравнение периодов, отчёты), а цифр нет — не отвечай результатом, попроси уточнить/отметь, что нужны данные. Не выдумывай периоды/годы.
+        - Пиши по делу, без воды и без упоминаний источников/контекста/базы/примеров. Не говори «как в примере», «как в базе».
         
-        Твоя задача — дать краткий, но информативный ответ на вопрос клиента о бухгалтерии, налогах, проверках ФНС и т.д.
-        
-        ПРАВИЛА:
-        1. Отвечай ЛАКОНИЧНО и по делу, без лишних деталей
-        2. Используй актуальную информацию о российском налоговом законодательстве
-        3. Если вопрос про конкретные действия - дай краткую инструкцию
-        4. Если вопрос про сроки - укажи актуальные даты относительно {msk_now}
-        5. Будь точным, но не перегружай деталями
-        6. Не используй Markdown разметку
-        
-        СТИЛЬ:
-        - Обращайся к клиенту по имени: {russian_name}
-        - Будь вежливой и профессиональной
-        - Пиши без воды, только суть
-        
-        Верни ТОЛЬКО текст ответа, без дополнительных пояснений.
+        Верни ТОЛЬКО текст ответа.
         """
         
         messages = [
@@ -870,10 +915,9 @@ class AIService:
         
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.1,
-                max_tokens=1000,
+                max_completion_tokens=1000,
             )
             answer = completion.choices[0].message.content.strip()
             logger.info(f"Generated general answer (without KB) for question='{question[:60]}...'")
@@ -947,10 +991,9 @@ class AIService:
 
         try:
             completion = await self.client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-5.1",
                 messages=messages,
-                temperature=0.3,
-                max_tokens=100,
+                max_completion_tokens=100,
             )
             response = completion.choices[0].message.content.strip().replace('"', '')
             # Подстраховка, если модель вернет что-то длинное
@@ -988,6 +1031,12 @@ class AIService:
         # Транслитерируем имя для использования в ответах
         russian_name = get_russian_name(client_name) if client_name else ""
 
+        def _lowercase_first(text: str) -> str:
+            if not text:
+                return text
+            first = text[0]
+            return first.lower() + text[1:] if first.isalpha() else text
+
         def _greeting_by_msk_time() -> str:
             try:
                 current = now_msk()
@@ -1007,5 +1056,5 @@ class AIService:
             return f"{greeting}, {russian_name}! {core}"
         if russian_name:
             # Короткое обращение без приветствия
-            return f"{russian_name}, {core}"
+            return f"{russian_name}, {_lowercase_first(core)}"
         return core
